@@ -1,0 +1,667 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "functionAppName": {
+            "type": "string"
+        },
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]"
+        },
+        "_artifactsLocation": {
+            "type": "string",
+            "metadata": {
+                "description": "The base URI where artifacts required by this template are located including a trailing '/'"
+            },
+            "defaultValue": "[deployment().properties.templateLink.uri]"
+        },
+        "_artifactsLocationSasToken": {
+            "type": "securestring",
+            "metadata": {
+                "description": "The sasToken required to access _artifactsLocation.  When the template is deployed using the accompanying scripts, a sasToken will be automatically generated. Use the defaultValue if the staging location is not secured."
+            },
+            "defaultValue": ""
+        }
+    },
+    "variables": {
+        "functionAppId": "[concat(resourceGroup().location,'/providers/Microsoft.Web/sites/', parameters('functionAppName'))]",
+        "functionAppUrl" : "[concat('https://', parameters('functionAppName'),'.azurewebsites.net/api/')]",
+        "hostingPlanName": "[concat('asp-',parameters('functionAppName'))]",
+        "managedIdentity": "[concat('mi-',parameters('functionAppName'), '')]",
+        "logicAppBaseName": "[concat('lapp-',parameters('functionAppName'), '')]",
+        "storageAccountName": "[concat('sa', uniquestring(resourceGroup().id))]",
+        "runtimeStack": "powershell",
+        "timezone": "UTC",
+        "functionArtifacts": "[uri(parameters('_artifactsLocation'), concat('web/ps.zip', parameters('_artifactsLocationSasToken')))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+            "name": "[variables('managedIdentity')]",
+            "apiVersion": "2018-11-30",
+            "location": "[resourceGroup().location]"
+        },
+        {
+            "name": "[parameters('functionAppName')]",
+            "type": "Microsoft.Web/sites",
+            "apiVersion": "2018-02-01",
+            "location": "[parameters('location')]",
+            "kind": "functionapp",            
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms/', variables('hostingPlanName'))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/',variables('managedIdentity'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+            ],
+            "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                    "[resourceID('Microsoft.ManagedIdentity/userAssignedIdentities/',variables('managedIdentity'))]": {}
+                }
+            },
+            "properties": {
+                "siteConfig": {
+                    "appSettings": [
+                        {
+                            "name": "FUNCTIONS_WORKER_RUNTIME",
+                            "value": "[variables('runtimeStack')]"
+                        },
+                        {
+                            "name": "AzureWebJobsStorage",
+                            "value": "[concat('DefaultEndpointsProtocol=https;AccountName=',variables('storageAccountName'),';AccountKey=',listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2017-06-01').keys[0].value)]"
+                        },
+                        {
+                            "name": "FUNCTIONS_EXTENSION_VERSION",
+                            "value": "~4"
+                        },
+                        {
+                            "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
+                            "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', variables('storageAccountName'), ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')),'2017-06-01').keys[0].value)]"
+                        },
+                        {
+                            "name": "WEBSITE_CONTENTSHARE",
+                            "value": "[toLower(parameters('functionAppName'))]"
+                        },
+                        {
+                            "name": "WEBSITE_TIME_ZONE",
+                            "value": "[variables('timezone')]"
+                        }
+                    ]
+                },
+                "name": "[parameters('functionAppName')]",
+                "clientAffinityEnabled": false,
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms/', variables('hostingPlanName'))]"
+            },
+            "resources": [
+                {
+                    "type": "Extensions",
+                    "apiVersion": "2020-12-01",
+                    "name": "MSDeploy",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/serverfarms/', variables('hostingPlanName'))]",
+                        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/',variables('managedIdentity'))]",
+                        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]",
+                        "[resourceId('Microsoft.Web/sites', parameters('functionAppName'))]"
+                    ],
+                    "properties": {
+                        "packageUri": "[variables('functionArtifacts')]"
+                    },
+                    "condition": "[not(equals(variables('functionArtifacts'), ''))]"
+                }
+            ]
+
+        },
+        {
+            "type": "Microsoft.Web/serverfarms",
+            "apiVersion": "2019-08-01",
+            "name": "[variables('hostingPlanName')]",
+            "location": "[parameters('location')]",
+            "properties": {
+                "name": "[variables('hostingPlanName')]"
+            },
+            "sku": {
+                "name": "Y1",
+                "tier": "Dynamic",
+                "size": "Y1",
+                "family": "Y",
+                "capacity": 0
+            }
+        },
+        {
+            "name": "[variables('storageAccountName')]",
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2018-07-01",
+            "location": "[parameters('location')]",
+            "kind": "StorageV2",
+            "tags": {
+                "type": "Function Storage",
+                "FunctionName": "[parameters('functionAppName')]"
+              },
+            "sku": {
+                "name": "Standard_LRS",
+                "tier": "Standard"
+            },
+            "properties": {
+                "accessTier": "Hot"
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[concat(variables('logicAppBaseName'),'-directhttp')]",
+            "location": "uksouth",
+            "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                    "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/',variables('managedIdentity'))]": {}
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms/', variables('hostingPlanName'))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/',variables('managedIdentity'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]",
+                "[resourceId('Microsoft.Web/sites', parameters('functionAppName'))]"
+            ],
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "functionAppName": {
+                            "defaultValue": "[parameters('functionAppName')]",
+                            "type": "String"
+                        },
+                        "functionAppKey": {
+                            // "defaultValue": "[listKeys(resourceId('Microsoft.Web/sites/', parameters('functionAppName'), '/functions/check'),'2018-11-01').functionKeys.default]",
+                            "defaultValue": "REPLACEME",
+                            "type": "String"
+                        }
+                    },
+                    "triggers": {
+                        "manual": {
+                            "type": "Request",
+                            "kind": "Http",
+                            "inputs": {
+                                "schema": {
+                                    "properties": {
+                                        "action": {
+                                            "type": "string"
+                                        },
+                                        "context": {
+                                            "type": "string"
+                                        },
+                                        "data": {
+                                            "type": "string"
+                                        },
+                                        "input": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "actions": {
+                        "Compose_MI_auth_to_Graph_API": {
+                            "runAfter": {},
+                            "type": "Compose",
+                            "inputs": {
+                                "audience": "https://graph.microsoft.com",
+                                "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/',variables('managedIdentity'))]",
+                                "type": "ManagedServiceIdentity"
+                            }
+                        },
+                        "Condition_-_passed_function_app_test": {
+                            "actions": {
+                                "Condition_-_is_valid_user": {
+                                    "actions": {
+                                        "Parse_JSON_-_Graph_User": {
+                                            "runAfter": {},
+                                            "type": "ParseJson",
+                                            "inputs": {
+                                                "content": "@body('HTTP_-_Get_user_from_Graph_API')",
+                                                "schema": {
+                                                    "properties": {
+                                                        "@@odata.context": {
+                                                            "type": "string"
+                                                        },
+                                                        "department": {},
+                                                        "displayName": {
+                                                            "type": "string"
+                                                        },
+                                                        "givenName": {},
+                                                        "id": {
+                                                            "type": "string"
+                                                        },
+                                                        "jobTitle": {},
+                                                        "mail": {},
+                                                        "officeLocation": {},
+                                                        "surname": {},
+                                                        "userPrincipalName": {
+                                                            "type": "string"
+                                                        }
+                                                    },
+                                                    "type": "object"
+                                                }
+                                            }
+                                        },
+                                        "Switch": {
+                                            "runAfter": {
+                                                "Parse_JSON_-_Graph_User": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "cases": {
+                                                "Case_getuser": {
+                                                    "case": "getuser",
+                                                    "actions": {
+                                                        "Compose_response_-_full_user_object": {
+                                                            "runAfter": {},
+                                                            "type": "Compose",
+                                                            "inputs": {
+                                                                "department": "@body('Parse_JSON_-_Graph_User')?['department']",
+                                                                "displayName": "@body('Parse_JSON_-_Graph_User')?['displayName']",
+                                                                "givenName": "@body('Parse_JSON_-_Graph_User')?['givenName']",
+                                                                "jobTitle": "@body('Parse_JSON_-_Graph_User')?['jobTitle']",
+                                                                "objectId": "@body('Parse_JSON_-_Graph_User')?['id']",
+                                                                "surname": "@body('Parse_JSON_-_Graph_User')?['surname']",
+                                                                "userPrincipalName": "@body('Parse_JSON_-_Graph_User')?['userPrincipalName']"
+                                                            }
+                                                        },
+                                                        "Compose_response_-_user_object_output": {
+                                                            "runAfter": {
+                                                                "Compose_response_-_full_user_object": [
+                                                                    "Succeeded"
+                                                                ]
+                                                            },
+                                                            "type": "Compose",
+                                                            "inputs": {
+                                                                "output": "@{outputs('Compose_response_-_full_user_object')}"
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                "Case_updateuser": {
+                                                    "case": "updateuser",
+                                                    "actions": {
+                                                        "Condition_-_context_is_department": {
+                                                            "actions": {
+                                                                "Condition_-_is_valid_department": {
+                                                                    "actions": {
+                                                                        "Condition_-_department_update_successful": {
+                                                                            "actions": {
+                                                                                "Compose_updated_user_data": {
+                                                                                    "runAfter": {},
+                                                                                    "type": "Compose",
+                                                                                    "inputs": {
+                                                                                        "department": "@{body('Parse_JSON_-_FA_validation')?['echo']}",
+                                                                                        "displayName": "@body('Parse_JSON_-_Graph_User')?['displayName']",
+                                                                                        "givenName": "@body('Parse_JSON_-_Graph_User')?['givenName']",
+                                                                                        "jobTitle": "@body('Parse_JSON_-_Graph_User')?['jobTitle']",
+                                                                                        "objectId": "@body('Parse_JSON_-_Graph_User')?['id']",
+                                                                                        "surname": "@body('Parse_JSON_-_Graph_User')?['surname']",
+                                                                                        "userPrincipalName": "@body('Parse_JSON_-_Graph_User')?['userPrincipalName']"
+                                                                                    }
+                                                                                },
+                                                                                "Compose_updated_user_object": {
+                                                                                    "runAfter": {
+                                                                                        "Compose_updated_user_data": [
+                                                                                            "Succeeded"
+                                                                                        ]
+                                                                                    },
+                                                                                    "type": "Compose",
+                                                                                    "inputs": {
+                                                                                        "output": "@{outputs('Compose_updated_user_data')}"
+                                                                                    }
+                                                                                }
+                                                                            },
+                                                                            "runAfter": {
+                                                                                "HTTP_-_Graph_API_-_Update_user_object": [
+                                                                                    "Succeeded"
+                                                                                ]
+                                                                            },
+                                                                            "else": {
+                                                                                "actions": {
+                                                                                    "Compose_could_not_update_user": {
+                                                                                        "runAfter": {},
+                                                                                        "type": "Compose",
+                                                                                        "inputs": {
+                                                                                            "output": "Failed to update user in Graph API"
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            },
+                                                                            "expression": {
+                                                                                "and": [
+                                                                                    {
+                                                                                        "greaterOrEquals": [
+                                                                                            "@outputs('HTTP_-_Graph_API_-_Update_user_object')['statusCode']",
+                                                                                            200
+                                                                                        ]
+                                                                                    },
+                                                                                    {
+                                                                                        "lessOrEquals": [
+                                                                                            "@outputs('HTTP_-_Graph_API_-_Update_user_object')['statusCode']",
+                                                                                            204
+                                                                                        ]
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            "type": "If"
+                                                                        },
+                                                                        "HTTP_-_Graph_API_-_Update_user_object": {
+                                                                            "runAfter": {
+                                                                                "Parse_JSON_-_FA_validation": [
+                                                                                    "Succeeded"
+                                                                                ]
+                                                                            },
+                                                                            "type": "Http",
+                                                                            "inputs": {
+                                                                                "authentication": "@outputs('Compose_MI_auth_to_Graph_API')",
+                                                                                "body": {
+                                                                                    "department": "@{body('Parse_JSON_-_FA_validation')?['echo']}"
+                                                                                },
+                                                                                "method": "PATCH",
+                                                                                "uri": "https://graph.microsoft.com/v1.0/users/@{body('Parse_JSON_-_Graph_User')?['id']}"
+                                                                            }
+                                                                        },
+                                                                        "Parse_JSON_-_FA_validation": {
+                                                                            "runAfter": {},
+                                                                            "type": "ParseJson",
+                                                                            "inputs": {
+                                                                                "content": "@body('HTTP_-_Validate_department_through_FA')",
+                                                                                "schema": {
+                                                                                    "properties": {
+                                                                                        "echo": {
+                                                                                            "type": "string"
+                                                                                        }
+                                                                                    },
+                                                                                    "type": "object"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    "runAfter": {
+                                                                        "HTTP_-_Validate_department_through_FA": [
+                                                                            "Succeeded",
+                                                                            "Failed",
+                                                                            "TimedOut"
+                                                                        ]
+                                                                    },
+                                                                    "else": {
+                                                                        "actions": {
+                                                                            "Compose_failed_to_validate_department": {
+                                                                                "runAfter": {},
+                                                                                "type": "Compose",
+                                                                                "inputs": {
+                                                                                    "output": "Invalid department"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    "expression": {
+                                                                        "and": [
+                                                                            {
+                                                                                "equals": [
+                                                                                    "@outputs('HTTP_-_Validate_department_through_FA')['statusCode']",
+                                                                                    200
+                                                                                ]
+                                                                            }
+                                                                        ]
+                                                                    },
+                                                                    "type": "If"
+                                                                },
+                                                                "HTTP_-_Validate_department_through_FA": {
+                                                                    "runAfter": {},
+                                                                    "type": "Http",
+                                                                    "inputs": {
+                                                                        "body": {
+                                                                            "echo": "@{triggerBody()?['data']}"
+                                                                        },
+                                                                        "method": "POST",
+                                                                        "uri": "https://@{parameters('functionAppName')}.azurewebsites.net/api/check?code=@{parameters('functionAppKey')}"
+                                                                    }
+                                                                }
+                                                            },
+                                                            "runAfter": {},
+                                                            "else": {
+                                                                "actions": {
+                                                                    "Compose_-_invalid_context": {
+                                                                        "runAfter": {},
+                                                                        "type": "Compose",
+                                                                        "inputs": {
+                                                                            "output": "Invalid context provided"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            "expression": {
+                                                                "and": [
+                                                                    {
+                                                                        "equals": [
+                                                                            "@triggerBody()?['context']",
+                                                                            "department"
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            },
+                                                            "type": "If"
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "default": {
+                                                "actions": {
+                                                    "Compose_response_-_UPN": {
+                                                        "runAfter": {},
+                                                        "type": "Compose",
+                                                        "inputs": {
+                                                            "output": "@{body('Parse_JSON_-_Graph_User')?['userPrincipalName']}"
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "expression": "@toLower(body('Parse_JSON_-_trigger_input')?['action'])",
+                                            "type": "Switch"
+                                        }
+                                    },
+                                    "runAfter": {
+                                        "HTTP_-_Get_user_from_Graph_API": [
+                                            "Succeeded",
+                                            "TimedOut",
+                                            "Failed"
+                                        ]
+                                    },
+                                    "else": {
+                                        "actions": {
+                                            "Compose_-_user_not_found": {
+                                                "runAfter": {},
+                                                "type": "Compose",
+                                                "inputs": {
+                                                    "output": "User not found"
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "expression": {
+                                        "and": [
+                                            {
+                                                "equals": [
+                                                    "@outputs('HTTP_-_Get_user_from_Graph_API')['statusCode']",
+                                                    200
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "type": "If"
+                                },
+                                "HTTP_-_Get_user_from_Graph_API": {
+                                    "runAfter": {
+                                        "Parse_JSON_-_function_app_output": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "Http",
+                                    "inputs": {
+                                        "authentication": "@outputs('Compose_MI_auth_to_Graph_API')",
+                                        "method": "GET",
+                                        "uri": "https://graph.microsoft.com/v1.0/users/@{body('Parse_JSON_-_function_app_output')?['echo']}?$select=id,displayName,mail,jobTitle,givenName,surname,officeLocation,userPrincipalName,department"
+                                    }
+                                },
+                                "Parse_JSON_-_function_app_output": {
+                                    "runAfter": {},
+                                    "type": "ParseJson",
+                                    "inputs": {
+                                        "content": "@body('HTTP_-_Send_through_function_app')",
+                                        "schema": {
+                                            "properties": {
+                                                "echo": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "HTTP_-_Send_through_function_app": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "else": {
+                                "actions": {
+                                    "Compose_empty_response": {
+                                        "runAfter": {},
+                                        "type": "Compose",
+                                        "inputs": {
+                                            "output": ""
+                                        }
+                                    }
+                                }
+                            },
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@outputs('HTTP_-_Send_through_function_app')['statusCode']",
+                                            200
+                                        ]
+                                    }
+                                ]
+                            },
+                            "type": "If"
+                        },
+                        "Condition_input_and_action_defined": {
+                            "actions": {
+                                "Terminate": {
+                                    "runAfter": {},
+                                    "type": "Terminate",
+                                    "inputs": {
+                                        "runError": {
+                                            "code": "405"
+                                        },
+                                        "runStatus": "Failed"
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "Parse_JSON_-_trigger_input": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "else": {
+                                "actions": {
+                                    "Compose": {
+                                        "runAfter": {},
+                                        "type": "Compose",
+                                        "inputs": {
+                                            "echo": "@{triggerBody()?['input']}"
+                                        }
+                                    }
+                                }
+                            },
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@length(body('Parse_JSON_-_trigger_input')?['action'])",
+                                            0
+                                        ]
+                                    },
+                                    {
+                                        "equals": [
+                                            "@length(body('Parse_JSON_-_trigger_input')?['input'])",
+                                            0
+                                        ]
+                                    },
+                                    {
+                                        "equals": [
+                                            "",
+                                            ""
+                                        ]
+                                    }
+                                ]
+                            },
+                            "type": "If"
+                        },
+                        "HTTP_-_Send_through_function_app": {
+                            "runAfter": {
+                                "Condition_input_and_action_defined": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Http",
+                            "inputs": {
+                                "body": "@outputs('Compose')",
+                                "method": "POST",
+                                "uri": "https://@{parameters('functionAppName')}.azurewebsites.net/api/check?code=@{parameters('functionAppKey')}"
+                            }
+                        },
+                        "Parse_JSON_-_trigger_input": {
+                            "runAfter": {
+                                "Compose_MI_auth_to_Graph_API": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@triggerBody()",
+                                "schema": {
+                                    "properties": {
+                                        "action": {
+                                            "type": "string"
+                                        },
+                                        "input": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "Response": {
+                            "runAfter": {
+                                "Condition_-_passed_function_app_test": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Response",
+                            "kind": "Http",
+                            "inputs": {
+                                "body": "@{outputs('Compose_response_-_UPN')}@{outputs('Compose_empty_response')}@{outputs('Compose_-_user_not_found')}@{outputs('Compose_response_-_user_object_output')}@{outputs('Compose_updated_user_object')}@{outputs('Compose_could_not_update_user')}@{outputs('Compose_failed_to_validate_department')}@{outputs('Compose_-_invalid_context')}",
+                                "statusCode": 200
+                            }
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {}
+            }
+        }
+    ],
+    "outputs": {
+    }
+}
